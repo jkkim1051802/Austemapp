@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import io
+import json
+import urllib.request
 from datetime import datetime
 
 st.set_page_config(
@@ -14,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 제조 현장 대시보드에 어울리는 현대적 CSS 스타일링
+# 제조 현장 대시보드에 어울리는 현대적 CSS 스타일링 (비표준 특수 공백 제거 완료)
 st.markdown("""
 <style>
     .metric-card {
@@ -46,7 +48,7 @@ def generate_sample_manufacturing_data() -> pd.DataFrame:
     """사용자가 테스트할 수 있도록 공정 샘플 데이터를 생성합니다."""
     np.random.seed(42)
     n = 120
-    timestamps = pd.date_range(start="2026-09-01", periods=n, freq="H")
+    timestamps = pd.date_range(start="2026-09-01", periods=n, freq="h")
     lines = ["1호기(조립)", "2호기(성형)", "3호기(도장)", "4호기(패키징)"]
     operators = ["김반장", "이엔지니어", "박기사", "최오퍼레이터"]
     
@@ -93,7 +95,6 @@ def load_uploaded_file(uploaded_file) -> pd.DataFrame:
 def detect_column_types(df: pd.DataFrame):
     """데이터프레임의 범주형과 수치형 컬럼을 자동으로 분류합니다."""
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    # 문자열, 카테고리, 날짜/시간 등을 범주형 후보로 분류
     categorical_cols = df.select_dtypes(include=['object', 'category', 'datetime64']).columns.tolist()
     return numeric_cols, categorical_cols
 
@@ -120,7 +121,7 @@ def detect_anomalies_and_emergencies(df: pd.DataFrame, numeric_cols: list):
         outlier_count = col_outliers.sum()
         
         if outlier_count > 0:
-            anomaly_mask = anomaly_mask | col_outliers
+            anomaly_mask = anomaly_mask | col_outliers.fillna(False)
             alerts.append({
                 "컬럼": col,
                 "유형": "통계적 이상치(IQR)",
@@ -129,7 +130,7 @@ def detect_anomalies_and_emergencies(df: pd.DataFrame, numeric_cols: list):
                 "수준": "주의" if outlier_count < 3 else "경고"
             })
             
-    # 2. 제조 현장 공통 긴급 임계치 검사 (컬럼명 패턴 매칭)
+    # 2. 제조 현장 공통 긴급 임계치 검사
     for col in numeric_cols:
         col_lower = col.lower()
         if "온도" in col_lower or "temp" in col_lower:
@@ -160,9 +161,7 @@ def detect_anomalies_and_emergencies(df: pd.DataFrame, numeric_cols: list):
 
 def summarize_data_for_ai(df: pd.DataFrame, alerts: list, numeric_cols: list, categorical_cols: list) -> str:
     """
-    [데이터 분석 전용 함수]
     AI API에 전달할 경량화된 구조적 통계 요약 텍스트를 생성합니다.
-    (민감한 전체 원본 데이터 전송 방지 및 토큰 효율화)
     """
     summary_lines = [
         f"- 총 데이터 행 수: {len(df)}개, 열 수: {len(df.columns)}개",
@@ -171,13 +170,14 @@ def summarize_data_for_ai(df: pd.DataFrame, alerts: list, numeric_cols: list, ca
         "\n[수치형 컬럼별 기초 통계]"
     ]
     
-    desc = df[numeric_cols].describe().round(2)
-    for col in numeric_cols:
-        if col in desc:
-            mean_val = desc.loc['mean', col]
-            min_val = desc.loc['min', col]
-            max_val = desc.loc['max', col]
-            summary_lines.append(f"  * {col}: 평균 {mean_val}, 최소 {min_val}, 최대 {max_val}")
+    if numeric_cols:
+        desc = df[numeric_cols].describe().round(2)
+        for col in numeric_cols:
+            if col in desc:
+                mean_val = desc.loc['mean', col]
+                min_val = desc.loc['min', col]
+                max_val = desc.loc['max', col]
+                summary_lines.append(f"  * {col}: 평균 {mean_val}, 최소 {min_val}, 최대 {max_val}")
             
     summary_lines.append("\n[탐지된 이상징후 및 경보 요약]")
     if alerts:
@@ -190,13 +190,9 @@ def summarize_data_for_ai(df: pd.DataFrame, alerts: list, numeric_cols: list, ca
 
 def request_ai_analysis(summary_text: str, api_key: str = None) -> str:
     """
-    [AI API 전용 함수]
-    데이터 분석 함수와 완전히 분리되어 작동하며,
-    API 키가 있을 경우 AI 제공자(OpenAI 호환 API)를 호출하고
-    키가 없을 경우 규칙 기반 인텔리전트 종합 진단을 제공합니다.
+    API 키 유무에 맞춰 OpenAI 또는 규칙 기반 진단을 반환합니다.
     """
     if not api_key:
-        # 안전한 기본 폴백(Fallback): API Key가 없을 때도 실무적인 종합 분석 리포트 제공
         return f"""### 🤖 AI 공정 진단 보고서 (규칙 기반 인텔리전스 모드)
 
 **1. 종합 공정 건전성 평가**
@@ -210,11 +206,7 @@ def request_ai_analysis(summary_text: str, api_key: str = None) -> str:
 *(더 정밀한 자연어 진단을 원하실 경우 사이드바에서 AI API Key를 등록하거나 환경변수를 설정해주세요.)*
 """
 
-    # API Key가 전달된 경우의 처리 (OpenAI 표준 API 호출 구조)
     try:
-        import urllib.request
-        import json
-        
         prompt = f"""
 당신은 대한민국 최고 수준의 스마트팩토리 제조 데이터 분석 전문가입니다.
 아래 제공된 제조 데이터 통계 요약과 이상징후 알림을 기반으로 관리자가 실행할 수 있는 실질적인 조치 보고서를 작성해주세요:
@@ -227,7 +219,6 @@ def request_ai_analysis(summary_text: str, api_key: str = None) -> str:
 3. 관리자 및 현장 작업자를 위한 3대 긴급 액션 아이템
 간결하고 가독성 높은 마크다운 형식으로 작성해주세요.
 """
-        # urllib를 활용한 의존성 없는 안전한 API 요청
         req = urllib.request.Request(
             "https://api.openai.com/v1/chat/completions",
             headers={
@@ -253,7 +244,7 @@ def request_ai_analysis(summary_text: str, api_key: str = None) -> str:
 
 st.sidebar.title("🏭 제조 데이터 제어판")
 
-# API Key는 환경변수 또는 st.secrets 우선 탐색 (코드에 직접 입력 금지)
+# API Key 우선 탐색
 default_api_key = os.getenv("OPENAI_API_KEY", "")
 if not default_api_key:
     try:
@@ -266,7 +257,7 @@ with st.sidebar.expander("🔑 AI 연동 설정", expanded=False):
         "OpenAI API Key (선택)",
         value=default_api_key,
         type="password",
-        help="환경변수/Secrets가 없을 경우 직접 입력할 수 있습니다. 키가 없어도 기본 진단 기능이 제공됩니다."
+        help="환경변수/Secrets가 없을 경우 직접 입력할 수 있습니다."
     )
 
 st.sidebar.subheader("📂 1. 데이터 소스")
@@ -278,15 +269,14 @@ uploaded_file = st.sidebar.file_uploader(
 
 use_sample_btn = st.sidebar.button("🧪 샘플 제조 공정 데이터 로드")
 
-# 세션 상태로 데이터 프레임 유지
+# 세션 상태 로직 수정 (버튼 클릭 시 강제 재생성 가능하도록 개선)
 if "active_df" not in st.session_state:
     st.session_state.active_df = None
 
 if uploaded_file is not None:
     st.session_state.active_df = load_uploaded_file(uploaded_file)
 elif use_sample_btn or st.session_state.active_df is None:
-    if st.session_state.active_df is None:
-        st.session_state.active_df = generate_sample_manufacturing_data()
+    st.session_state.active_df = generate_sample_manufacturing_data()
 
 df_raw = st.session_state.active_df
 
@@ -297,11 +287,10 @@ if df_raw is not None and not df_raw.empty:
     numeric_columns, categorical_columns = detect_column_types(df_raw)
     alerts, emergency_df = detect_anomalies_and_emergencies(df_raw, numeric_columns)
     
-    # [추가 기능] 관리자 긴급 이상징후 모니터링 영역
     st.subheader("🚨 관리자 모니터링 & 이상징후 알림")
     
     emergency_count = len([a for a in alerts if a['수준'] == '긴급'])
-    warning_count = len([a for a in alerts if a['수준'] == '경고'])
+    warning_count = len([a for a in alerts if a['수준'] in ['경고', '주의']])
     
     col_a, col_b, col_c = st.columns([1, 1, 2])
     with col_a:
@@ -329,7 +318,7 @@ if df_raw is not None and not df_raw.empty:
     total_rows = len(df_raw)
     total_cols = len(df_raw.columns)
     total_missing = df_raw.isnull().sum().sum()
-    missing_ratio = (total_missing / (total_rows * total_cols)) * 100 if total_rows > 0 else 0
+    missing_ratio = (total_missing / (total_rows * total_cols)) * 100 if (total_rows * total_cols) > 0 else 0
     
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     m_col1.metric("총 행 수 (Records)", f"{total_rows:,} 개")
@@ -337,7 +326,6 @@ if df_raw is not None and not df_raw.empty:
     m_col3.metric("결측치 개수", f"{total_missing:,} 개")
     m_col4.metric("결측치 비율", f"{missing_ratio:.2f} %")
     
-    # 4 & 5. 범주형/수치형 컬럼 자동 인식 결과 출력
     col_type_info1, col_type_info2 = st.columns(2)
     with col_type_info1:
         st.info(f"**🔢 자동 인식된 수치형 컬럼 ({len(numeric_columns)}개):**\n\n{', '.join(numeric_columns) if numeric_columns else '없음'}")
@@ -347,7 +335,6 @@ if df_raw is not None and not df_raw.empty:
     st.sidebar.subheader("🎯 3. 데이터 필터링")
     filtered_df = df_raw.copy()
     
-    # 범주형 컬럼 중 하나를 골라 다중 선택 필터 적용
     if categorical_columns:
         primary_cat = st.sidebar.selectbox("필터링 기준 범주 컬럼", categorical_columns, index=0)
         unique_values = filtered_df[primary_cat].dropna().unique().tolist()
@@ -359,11 +346,10 @@ if df_raw is not None and not df_raw.empty:
         if selected_values:
             filtered_df = filtered_df[filtered_df[primary_cat].isin(selected_values)]
             
-    # 수치형 컬럼 범위 슬라이더 필터
     if numeric_columns:
         slider_col = st.sidebar.selectbox("범위 필터 적용 수치 컬럼", numeric_columns, index=0)
-        min_v = float(df_raw[slider_col].min())
-        max_v = float(df_raw[slider_col].max())
+        min_v = float(df_raw[slider_col].min(skipna=True))
+        max_v = float(df_raw[slider_col].max(skipna=True))
         if min_v < max_v:
             selected_range = st.sidebar.slider(
                 f"{slider_col} 범위",
@@ -385,7 +371,6 @@ if df_raw is not None and not df_raw.empty:
     if not filtered_df.empty and numeric_columns:
         v_col1, v_col2 = st.columns(2)
         
-        # 7. 막대 그래프 (Bar Chart)
         with v_col1:
             st.markdown("##### 📊 범주별 지표 분석 (막대 그래프)")
             bar_x = st.selectbox("X축 (범주형 컬럼)", options=categorical_columns if categorical_columns else df_raw.columns, key="bar_x")
@@ -393,7 +378,7 @@ if df_raw is not None and not df_raw.empty:
             agg_method = st.selectbox("집계 방식", ["평균(Mean)", "합계(Sum)", "최댓값(Max)"], key="bar_agg")
             
             agg_dict = {"평균(Mean)": "mean", "합계(Sum)": "sum", "최댓값(Max)": "max"}
-            grouped_data = filtered_df.groupby(bar_x)[bar_y].agg(agg_dict[agg_method]).reset_index()
+            grouped_data = filtered_df.groupby(bar_x, as_index=False)[bar_y].agg(agg_dict[agg_method])
             
             fig_bar = px.bar(
                 grouped_data,
@@ -402,19 +387,19 @@ if df_raw is not None and not df_raw.empty:
                 title=f"{bar_x}별 {bar_y} {agg_method}",
                 color=bar_y,
                 color_continuous_scale="Blues",
-                text_auto=True
+                text_auto=".2f"
             )
             fig_bar.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=40, b=20))
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # 8. 선 그래프 (Line Chart)
         with v_col2:
             st.markdown("##### 📉 시계열 및 추세 분석 (선 그래프)")
-            # 날짜 또는 인덱스를 X축으로 기본 설정
             date_candidates = [c for c in df_raw.columns if "일시" in c or "date" in c.lower() or "time" in c.lower()]
             default_line_x = date_candidates[0] if date_candidates else df_raw.columns[0]
             
-            line_x = st.selectbox("X축 (시간 또는 순서)", options=df_raw.columns, index=df_raw.columns.get_loc(default_line_x), key="line_x")
+            default_idx = list(df_raw.columns).index(default_line_x) if default_line_x in df_raw.columns else 0
+            
+            line_x = st.selectbox("X축 (시간 또는 순서)", options=df_raw.columns, index=default_idx, key="line_x")
             line_y = st.multiselect("Y축 (수치형 모니터링 컬럼)", options=numeric_columns, default=[numeric_columns[0]], key="line_y")
             
             if line_y:
@@ -438,12 +423,8 @@ if df_raw is not None and not df_raw.empty:
 
     if st.button("🚀 AI 분석 실행하기", type="primary"):
         with st.spinner("공정 요약 통계 집계 및 AI 진단 중..."):
-            # 1. 데이터 분석 함수 호출 (데이터 처리 및 통계 분리)
             summary_info = summarize_data_for_ai(filtered_df, alerts, numeric_columns, categorical_columns)
-            
-            # 2. AI 분석 함수 호출 (외부 API 및 추론 분리)
             ai_result = request_ai_analysis(summary_info, user_api_key)
-            
             st.markdown(ai_result)
 
     st.markdown("---")
@@ -460,5 +441,7 @@ if df_raw is not None and not df_raw.empty:
         mime="text/csv"
     )
 
+else:
+    st.info("좌측 사이드바에서 분석할 CSV/Excel 파일을 업로드하거나, 샘플 데이터를 로드해주세요.")
 else:
     st.info("좌측 사이드바에서 분석할 CSV/Excel 파일을 업로드하거나, 샘플 데이터를 로드해주세요.")
