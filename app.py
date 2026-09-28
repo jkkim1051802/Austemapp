@@ -443,5 +443,3 @@ if df_raw is not None and not df_raw.empty:
 
 else:
     st.info("좌측 사이드바에서 분석할 CSV/Excel 파일을 업로드하거나, 샘플 데이터를 로드해주세요.")
-else:
-    st.info("좌측 사이드바에서 분석할 CSV/Excel 파일을 업로드하거나, 샘플 데이터를 로드해주세요.")
